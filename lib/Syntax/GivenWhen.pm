@@ -48,11 +48,12 @@ sub import {
             given   => { const => \&setup_given   },
             when    => { const => \&setup_when    },
             default => { const => \&setup_default },
+            break   => { const => \&setup_break   },
         });
 
         no strict "vars";
         @ISA    = qw< Exporter >;
-        @EXPORT = qw< given when default >;
+        @EXPORT = qw< given when default break >;
         $class->export_to_level(1, @_);
     }
     else {
@@ -65,6 +66,7 @@ sub import {
 sub given   (&) { $_[0]->() }
 sub when    (&) { $_[0]->() }
 sub default (&) { $_[0]->() }
+sub break   ()  { }
 
 
 sub setup_given {
@@ -97,6 +99,16 @@ sub setup_default {
 
     skip_token();                   # step past the "default" keyword
     inject_if_block(scope_injector_call());
+
+    print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
+        if DEBUG;
+}
+
+
+sub setup_break {
+    local ($Declarator, $Offset) = @_;
+
+    skip_token();                   # step past the "break" keyword
 
     print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
         if DEBUG;
