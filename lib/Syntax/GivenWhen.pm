@@ -7,8 +7,13 @@ use warnings;
 
 our $VERSION = "0.01";
 
+use constant DEBUG => 1;
+
+
 BEGIN {
     if ($] < 5.010) {
+        print STDERR "debug: detected Perl 5.8\n" if DEBUG;
+
         require B::Hooks::EndOfScope;
         B::Hooks::EndOfScope->import;
 
@@ -16,8 +21,14 @@ BEGIN {
         Devel::Declare->import;
 
         require Exporter;
+
+        if (DEBUG) {
+            require Term::ANSIColor;
+            Term::ANSIColor->import(":constants");
+        }
     }
     else {
+        print STDERR "debug: detected Perl 5.10+\n" if DEBUG;
         require feature;
     }
 }
@@ -31,6 +42,8 @@ sub import {
     my $caller  = $args{for} || caller();
 
     if ($] < 5.010) {
+        print STDERR "debug: installing Devel::Declare hooks\n" if DEBUG;
+
         Devel::Declare->setup_for($caller, {
             given   => { const => \&setup_given   },
             when    => { const => \&setup_when    },
@@ -43,6 +56,7 @@ sub import {
         $class->export_to_level(1, @_);
     }
     else {
+        print STDERR "debug: loading feature 'switch'\n" if DEBUG;
         feature->import("switch");
     }
 }
@@ -59,6 +73,9 @@ sub setup_given {
     skip_token();                   # step past the "given" keyword
     my $parens = strip_parens();    # strip out the expr in parens
     inject_if_block("local (\$_) = ($parens); my \$__found__ = 0;");
+
+    print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
+        if DEBUG;
 }
 
 
@@ -69,6 +86,9 @@ sub setup_when {
     my $parens = strip_parens();    # strip out the expr in parens
     my $inject = scope_injector_call($parens) . "\$__found__ = 1;";
     inject_if_block($inject);
+
+    print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
+        if DEBUG;
 }
 
 
@@ -77,6 +97,9 @@ sub setup_default {
 
     skip_token();                   # step past the "default" keyword
     inject_if_block(scope_injector_call());
+
+    print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
+        if DEBUG;
 }
 
 
