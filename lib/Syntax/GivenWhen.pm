@@ -1,4 +1,4 @@
-package GivenWhen;
+package Syntax::GivenWhen;
 
 use 5.008;
 use strict;
