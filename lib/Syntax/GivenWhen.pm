@@ -20,7 +20,11 @@ BEGIN {
         require Devel::Declare;
         Devel::Declare->import;
 
+        require Carp;
+        Carp->import;
+
         require Exporter;
+        require overload;
 
         if (DEBUG) {
             require Term::ANSIColor;
@@ -63,18 +67,22 @@ sub import {
 }
 
 
-sub given   (&) { $_[0]->() }
-sub when    (&) { $_[0]->() }
-sub default (&) { $_[0]->() }
-sub break   ()  { }
-
+######################################################################
+# Compilation phase
+# -----------------
+# The following functions are called during compilation, to modify
+# the source code and setup the magic.
+#
 
 sub setup_given {
     local ($Declarator, $Offset) = @_;
 
     skip_token();                   # step past the "given" keyword
     my $parens = strip_parens();    # strip out the expr in parens
-    inject_if_block("local (\$_) = ($parens); my \$__found__ = 0;");
+
+    my $inject = scope_injector_call()
+        . qq| local (\$_) = ($parens); my \$__found__ = 0;|;
+    inject_if_block($inject);
 
     print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
         if DEBUG;
@@ -86,7 +94,24 @@ sub setup_when {
 
     skip_token();                   # step past the "when" keyword
     my $parens = strip_parens();    # strip out the expr in parens
-    my $inject = scope_injector_call($parens) . "\$__found__ = 1;";
+
+    # smart match
+    print STDERR "debug: parens=(", YELLOW, $parens, RESET, ")\n" if DEBUG;
+    if ($parens eq "undef") {
+        $parens = "!defined";
+    }
+    elsif ($parens =~ /^[+-]?[\d._]+$/) {
+        $parens = "\$_ == $parens";
+    }
+    elsif ($parens =~ /^".*"$/ or $parens =~ /^'.*'$/ or $parens =~ /^q\W/) {
+        $parens = "\$_ eq $parens";
+    }
+    else {
+        $parens = __PACKAGE__."::smart_match($parens)";
+    }
+
+    my $inject = when_scope_injector_call($parens) . q|eval { $__found__ = 1 }; |
+        . q|die "Can't use when() outside a topicalizer" if $@;|;
     inject_if_block($inject);
 
     print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
@@ -98,7 +123,7 @@ sub setup_default {
     local ($Declarator, $Offset) = @_;
 
     skip_token();                   # step past the "default" keyword
-    inject_if_block(scope_injector_call());
+    inject_if_block(when_scope_injector_call());
 
     print STDERR "debug: ", CYAN, Devel::Declare::get_linestr(), RESET
         if DEBUG;
@@ -172,13 +197,28 @@ sub inject_if_block {
 
 
 sub scope_injector_call {
-    my ($cond) = @_;
-    $cond ||= "";
-    return " BEGIN { ".__PACKAGE__."::inject_scope(q{$cond}) }; ";
+    return " BEGIN { ".__PACKAGE__."::inject_scope() }; ";
 }
 
 
 sub inject_scope {
+    on_scope_end {
+        my $linestr = Devel::Declare::get_linestr();
+        my $offset = Devel::Declare::get_linestr_offset();
+        substr($linestr, $offset, 0) = ";";
+        Devel::Declare::set_linestr($linestr);
+    };
+}
+
+
+sub when_scope_injector_call {
+    my ($cond) = @_;
+    $cond ||= "";
+    return " BEGIN { ".__PACKAGE__."::inject_when_scope(q{$cond}) }; ";
+}
+
+
+sub inject_when_scope {
     my ($cond) = @_;
     my $more = $cond ? " and $cond" : "";
 
@@ -188,6 +228,128 @@ sub inject_scope {
         substr($linestr, $offset, 0) = " if not \$__found__ $more;";
         Devel::Declare::set_linestr($linestr);
     };
+}
+
+
+######################################################################
+# Runtime phase
+# -------------
+# The following functions are called during runtime.
+#
+
+# keywords
+sub given   (&) { $_[0]->() }
+sub when    (&) { $_[0]->() }
+sub default (&) { $_[0]->() }
+sub break   ()  { }
+
+sub smart_match {
+    my ($A, $B) = ($_, $_[0]);
+    my $type_of_A = ucfirst(lc ref $A) || "Any";
+    my $type_of_B = ucfirst(lc ref $B) || "Any";
+    print STDERR "debug: smart match: A = $type_of_A($A), B = $type_of_B($B)\n"
+        if DEBUG;
+
+    # detect if one of the operands is an object
+    if ($type_of_B !~ /^(?:Any|Array|Code|Hash|Regexp)$/) {
+        if (overload::Overloaded($B) and my $method = overload::Method($B, "~~")) {
+            return $B->$method($A);
+        }
+        else {
+            croak "Smart matching a non-overloaded object breaks encapsulation"
+        }
+    }
+    elsif ($type_of_A !~ /^(?:Any|Array|Code|Hash|Regexp)$/) {
+        if (overload::Overloaded($A) and my $method = overload::Method($A, "~~")) {
+            return $A->$method($B);
+        }
+        else {
+            croak "Smart matching a non-overloaded object breaks encapsulation"
+        }
+    }
+
+    elsif ($type_of_B ne "Any") {
+        if ($type_of_B eq "Array") {
+            if ($type_of_A eq "Hash") {
+                # hash keys intersection
+                return grep { exists $A->{$_} } @$B
+            }
+            elsif ($type_of_A eq "Array") {
+                # arrays are comparable
+                die "unimplemented" #XXX#
+            }
+            elsif ($type_of_A eq "Regexp") {
+                # array grep
+                return grep { /$A/ } @$B
+            }
+            elsif (not defined $A) {
+                # array contains undef
+                return grep { not defined } @$B
+            }
+            else { # type Any
+                # match against an array element
+                #   grep { $a ~~ $_ } @$b
+                die "unimplemented" #XXX#
+            }
+        }
+
+        elsif ($type_of_B eq "Hash") {
+            if ($type_of_A eq "Hash") {
+                # hash keys identical (every key is found in both hashes)
+                die "unimplemented" #XXX#
+            }
+            elsif ($type_of_A eq "Array") {
+                # hash keys intersection
+                return grep { exists $B->{$_} } @$A
+            }
+            elsif ($type_of_A eq "Regexp") {
+                # hash key grep
+                return grep { /$A/ } keys %$B
+            }
+            elsif (not defined $A) {
+                # always false (undef can't be a key)
+                return
+            }
+            else { # type Any
+                # hash entry existence
+                return exists $B->{$A}
+            }
+        }
+
+        elsif ($type_of_B eq "Regexp") {
+            if ($type_of_A eq "Hash") {
+                # hash key grep
+                return grep { /$B/ } keys %$A
+            }
+            elsif ($type_of_A eq "Array") {
+                # array grep
+                return grep { /$B/ } @$A
+            }
+            else { # type Any
+                # pattern match
+                return $A =~ $B
+            }
+        }
+
+        elsif ($type_of_B eq "Code") {
+            if ($type_of_A eq "Hash") {
+                # sub truth for each key
+                return !grep { !$B->($_) } keys %$A
+            }
+            elsif ($type_of_A eq "Array") {
+                # sub truth for each element
+                return !grep { !$B->($_) } @$A
+            }
+            else { # type Any
+                # scalar sub truth
+                return $B->($A)
+            }
+        }
+
+    }
+    else {
+        return $_[0]
+    }
 }
 
 
